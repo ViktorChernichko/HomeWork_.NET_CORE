@@ -3,11 +3,14 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using DZ6.Data;
-using DZ6.Models;
+using DZ6.Dto;
+using DZ6.Mappers;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Rendering;
 using Microsoft.EntityFrameworkCore;
+using DZ6.Entities;
+using DZ6.ViewModel;
 
 namespace DZ6.Controllers
 {
@@ -23,30 +26,54 @@ namespace DZ6.Controllers
         // GET: UserPost
         public async Task<IActionResult> Index()
         {
+            // 1) Витягуємо з БД сутності Post разом із пов’язаними даними.
+            // Include(p => p.Author) та Include(p => p.Tags) — явне завантаження навігаційних властивостей,
+            // щоб уникнути N+1 запитів і мати все необхідне для побудови ViewModel одразу.
             var applicationDbContext =
                 _context.Posts
                     .Include(p => p.Author)
                     .Include(p => p.Tags);
-            return View(await applicationDbContext.ToListAsync());
+            
+            // 2) Матеріалізуємо запит асинхронно (ToListAsync), а вже потім мапимо в ViewModel.
+            // Чому не проектувати одразу в ViewModel через Select?
+            // - Ми централізуємо всю логіку перетворення в PostMapper, дотримуючись SRP.
+            // - Це спрощує супровід і повторне використання (один шлях мапінгу Entity -> ViewModel для різних місць).
+            // - Зберігаємо «чистоту» мапера (без залежності від EF) і зменшуємо ризик помилок у складних проєкціях LINQ-to-Entities.
+            var vm = PostMapper.ToViewModels(await applicationDbContext.ToListAsync());
+            
+            // 3) Повертаємо колекцію ViewModel у View — представлення працює зі зручною для UI моделлю,
+            // а не з сутністю БД. Це підвищує безпеку (без зайвих полів) і спрощує розмітку.
+            return View(vm);
         }
 
         // GET: UserPost/Details/5
         public async Task<IActionResult> Details(int? id)
         {
+            // Валідуємо вхідні дані маршруту
             if (id == null)
             {
                 return NotFound();
             }
 
-            var postModel = await _context.Posts
+            // 1) Завантажуємо сутність Post разом із пов’язаними даними, необхідними для відображення.
+            //    Include(p => p.Author) та Include(p => p.Tags) — щоб уникнути N+1 та одразу мати повний набір даних для ViewModel.
+            var entity = await _context.Posts
                 .Include(p => p.Author)
+                .Include(p => p.Tags)
                 .FirstOrDefaultAsync(m => m.Id == id);
-            if (postModel == null)
+            if (entity == null)
             {
                 return NotFound();
             }
 
-            return View(postModel);
+            // 2) Мапимо Entity -> ViewModel через PostMapper.
+            //    Чому не проектуємо напряму в LINQ? Ми централізуємо перетворення у мапері (SRP),
+            //    тримаючи його «чистим» (без залежності від DbContext) і забезпечуючи єдиний шлях мапінгу в усьому коді.
+            var vm = PostMapper.ToViewModel(entity);
+
+            // 3) Повертаємо ViewModel у представлення — це підвищує безпеку (лише потрібні для UI поля)
+            //    та спрощує верстку (готові до відображення значення, форматування дат тощо).
+            return View(vm);
         }
 
         // GET: UserPost/Create
@@ -64,7 +91,7 @@ namespace DZ6.Controllers
         [ValidateAntiForgeryToken]
         [Authorize]
         public async Task<IActionResult> Create([
-            Bind("Id,Title,Slug,Content,SelectedTagIds")] PostCreateViewModel data)
+            Bind("Id,Title,Slug,Content,SelectedTagIds")] PostCreateDto data)
         {
             if (ModelState.IsValid)
             {
@@ -76,19 +103,25 @@ namespace DZ6.Controllers
                 }
                 else
                 {
-                    var postModel = data.ToPostModel(userId);
-                    postModel.AuthorId = userId;
+                    var postEntity = PostMapper.ToEntity(data, userId);
 
-                    // Attach selected tags
-                    if (postModel.SelectedTagIds != null && postModel.SelectedTagIds.Count > 0)
+                    // Пояснення (чому не в Mapper):
+                    // - Mapper повинен залишатися «чистим» і не знати про джерела даних (DbContext, SQL, HTTP тощо).
+                    // - Прив’язка тегів потребує доступу до БД (завантаження сутностей Tag за SelectedTagIds),
+                    //   тому це відповідальність шару доступу до даних або сервісу/контролера, але не мапера.
+                    // - Так ми дотримуємось SRP (Single Responsibility Principle) і спрощуємо тестування мапера.
+                    //
+                    // Альтернатива: винести цей блок у доменний сервіс (наприклад, IPostService.AttachTagsAsync),
+                    // який інкапсулює роботу з DbContext. Контролер тоді викликатиме сервіс, а мапер залишиться простим.
+                    if (data.SelectedTagIds != null && data.SelectedTagIds.Count > 0)
                     {
                         var tags = await _context.Tags
-                            .Where(t => postModel.SelectedTagIds.Contains(t.Id))
+                            .Where(t => data.SelectedTagIds.Contains(t.Id))
                             .ToListAsync();
-                        postModel.Tags = tags;
+                        postEntity.Tags = tags;
                     }
 
-                    _context.Add(postModel);
+                    _context.Add(postEntity);
                     await _context.SaveChangesAsync();
                     return RedirectToAction(nameof(Index));
                 }
@@ -107,37 +140,67 @@ namespace DZ6.Controllers
                 return NotFound();
             }
 
-            var postModel = await _context.Posts.FindAsync(id);
-            if (postModel == null)
+            // Завантажуємо сутність разом із тегами, щоб попередньо заповнити форму редагування
+            var entity = await _context.Posts
+                .Include(p => p.Tags)
+                .FirstOrDefaultAsync(p => p.Id == id);
+            if (entity == null)
             {
                 return NotFound();
             }
-            ViewData["AuthorId"] = new SelectList(_context.Users, "Id", "Id", postModel.AuthorId);
-            return View(postModel);
+
+            // Мапимо сутність -> DTO для редагування. View працює з DTO, а не з Entity (захист від over-posting)
+            var dto = PostMapper.ToUpdateDto(entity);
+
+            // Підготуємо список тегів для мультивибору з попередньо вибраними значеннями
+            ViewData["Tags"] = new MultiSelectList(_context.Tags, "Id", "Name", dto.SelectedTagIds);
+
+            return View(dto);
         }
 
         // POST: UserPost/Edit/5
         // To protect from overposting attacks, enable the specific properties you want to bind to.
         // For more details, see http://go.microsoft.com/fwlink/?LinkId=317598.
         [HttpPost]
+        [Authorize]
         [ValidateAntiForgeryToken]
-        public async Task<IActionResult> Edit(int id, [Bind("Id,Title,Slug,Content,AuthorId,CreatedAt,UpdatedAt")] PostModel postModel)
+        public async Task<IActionResult> Edit(int id, [Bind("Id,Title,Slug,Content,SelectedTagIds")] PostUpdateDto data)
         {
-            if (id != postModel.Id)
+            // Перевіряємо узгодженість Id у маршруті та у тілі запиту/форми
+            if (id != data.Id)
             {
                 return NotFound();
             }
 
             if (ModelState.IsValid)
             {
+                // 1) Завантажуємо наявну сутність з БД разом із поточними тегами
+                var entity = await _context.Posts
+                    .Include(p => p.Tags)
+                    .FirstOrDefaultAsync(p => p.Id == id);
+                if (entity == null)
+                {
+                    return NotFound();
+                }
+
+                // 2) Застосовуємо зміни через мапер — мапер не звертається до БД (SRP)
+                PostMapper.ApplyUpdates(entity, data);
+
+                // 3) Оновлюємо зв'язки тегів (many-to-many) тут, де доступний DbContext, а не в мапері
+                var selectedIds = data.SelectedTagIds ?? new List<int>();
+                var newTags = await _context.Tags
+                    .Where(t => selectedIds.Contains(t.Id))
+                    .ToListAsync();
+                entity.Tags = newTags;
+
                 try
                 {
-                    _context.Update(postModel);
+                    _context.Update(entity);
                     await _context.SaveChangesAsync();
                 }
                 catch (DbUpdateConcurrencyException)
                 {
-                    if (!PostModelExists(postModel.Id))
+                    if (!PostModelExists(entity.Id))
                     {
                         return NotFound();
                     }
@@ -148,8 +211,10 @@ namespace DZ6.Controllers
                 }
                 return RedirectToAction(nameof(Index));
             }
-            ViewData["AuthorId"] = new SelectList(_context.Users, "Id", "Id", postModel.AuthorId);
-            return View(postModel);
+
+            // Якщо валідація не пройшла — знову підготуємо список тегів із вибраними значеннями та повернемо форму
+            ViewData["Tags"] = new MultiSelectList(_context.Tags, "Id", "Name", data.SelectedTagIds);
+            return View(data);
         }
 
         // GET: UserPost/Delete/5
@@ -174,6 +239,7 @@ namespace DZ6.Controllers
         // POST: UserPost/Delete/5
         [HttpPost, ActionName("Delete")]
         [ValidateAntiForgeryToken]
+        [Authorize]
         public async Task<IActionResult> DeleteConfirmed(int id)
         {
             var postModel = await _context.Posts.FindAsync(id);

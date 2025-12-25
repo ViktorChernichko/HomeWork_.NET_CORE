@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using DZ6.Data;
-using DZ6.Models;
+using DZ6.Entities;
 
 var builder = WebApplication.CreateBuilder(args);
 

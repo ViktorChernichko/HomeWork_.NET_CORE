@@ -1,8 +1,8 @@
 ﻿using Microsoft.AspNetCore.Identity;
 
-namespace DZ6.Models;
+namespace DZ6.Entities;
 
 public class MyIdentityUser : IdentityUser
 {
-    public ICollection<PostModel> Posts { get; set; } = new List<PostModel>();
+    public ICollection<PostEntity> Posts { get; set; } = new List<PostEntity>();
 }

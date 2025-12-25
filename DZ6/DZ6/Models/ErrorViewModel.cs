@@ -1,4 +1,4 @@
-namespace DZ6.Models;
+namespace DZ6.Entities;
 
 public class ErrorViewModel
 {

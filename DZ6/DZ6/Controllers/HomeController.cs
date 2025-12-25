@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using DZ6.Models;
+using DZ6.Entities;
 using Microsoft.AspNetCore.Mvc;
 
 namespace DZ6.Controllers;
